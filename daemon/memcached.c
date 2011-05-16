@@ -32,6 +32,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+#include "sflow_mc.h"
+
+
 static inline void item_set_cas(const void *cookie, item *it, uint64_t cas) {
     settings.engine.v1->item_set_cas(settings.engine.v0, cookie, it, cas);
 }
@@ -1066,6 +1069,8 @@ static void complete_update_ascii(conn *c) {
                                         c->store_op, 0);
     }
 
+    SFLOW_SAMPLE(c, info.key, info.nkey, 0, (ret == ENGINE_SUCCESS) ? info.nbytes : -1, ret);
+
 #ifdef ENABLE_DTRACE
     switch (c->store_op) {
     case OPERATION_ADD:
@@ -1575,6 +1580,8 @@ static void complete_update_bin(conn *c) {
                                         c->binary_header.request.vbucket);
     }
 
+    SFLOW_SAMPLE(c, info.key, info.nkey, 0, (ret == ENGINE_SUCCESS) ? info.nbytes : -1, ret);
+    
 #ifdef ENABLE_DTRACE
     switch (c->cmd) {
     case OPERATION_ADD:
@@ -2865,6 +2872,7 @@ static void dispatch_bin_command(conn *c) {
     }
 
     MEMCACHED_PROCESS_COMMAND_START(c->sfd, c->rcurr, c->rbytes);
+    SFLOW_COMMAND_START(c);
     c->noreply = true;
 
     /* binprot supports 16bit keys, but internals are still 8bit */
@@ -4074,6 +4082,8 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
 
                 MEMCACHED_COMMAND_GET(c->sfd, info.key, info.nkey,
                                       info.nbytes, info.cas);
+
+                SFLOW_SAMPLE(c, key, info.nkey, ntokens-2, info.nbytes, ret);
                 if (return_cas)
                 {
 
@@ -4124,6 +4134,7 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
             } else {
                 STATS_MISS(c, get, key, nkey);
                 MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
+                SFLOW_SAMPLE(c, key, nkey, ntokens-2, -1, ENGINE_KEY_ENOENT); 
             }
 
             key_token++;
@@ -4435,6 +4446,7 @@ static char* process_command(conn *c, char *command) {
     assert(c != NULL);
 
     MEMCACHED_PROCESS_COMMAND_START(c->sfd, c->rcurr, c->rbytes);
+    SFLOW_COMMAND_START(c);
 
     if (settings.verbose > 1) {
         settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
@@ -6017,6 +6029,7 @@ static void clock_handler(const int fd, const short which, void *arg) {
     evtimer_add(&clockevent, &t);
 
     set_current_time();
+    SFLOW_TICK(current_time);
 }
 
 static void usage(void) {

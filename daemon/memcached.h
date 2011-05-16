@@ -376,6 +376,9 @@ struct conn {
     bool ewouldblock;
     bool tap_nack_mode;
     TAP_ITERATOR tap_iterator;
+#ifdef ENABLE_SFLOW
+    struct timeval sflow_start_time;
+#endif
 };
 
 /* States for the connection list_state */

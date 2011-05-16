@@ -463,6 +463,14 @@ AS_IF([ test "x$ac_cv_header_umem_h" = "xyes" ], [
 
 AM_CONDITIONAL([BUILD_CACHE], [test "x$build_cache" = "xyes"])
 
+dnl Option to include sFlow
+AC_ARG_ENABLE(sflow,
+  [AS_HELP_STRING([--enable-sflow],[Include sFlow instrumentation])])
+if test "x$enable_sflow" = "xyes"; then
+  AC_DEFINE([ENABLE_SFLOW],1,[Set to nonzero if you want to include sFlow])
+fi
+AM_CONDITIONAL([BUILD_SFLOW],[test "x$enable_sflow" = "xyes"])
+
 dnl Let the compiler be a bit more picky. Please note that you cannot
 dnl specify these flags to the compiler before AC_CHECK_FUNCS, because
 dnl the test program will generate a compilation warning and hence fail
