@@ -25,6 +25,10 @@
 
 #include "sflow_mc.h"
 
+// globals
+uint32_t sflow_sample_pool;
+uint32_t sflow_skip;
+
 #include "sflow_api.h"
 #define SFMC_VERSION "0.91"
 #define SFMC_DEFAULT_CONFIGFILE "/etc/hsflowd.auto"
@@ -50,9 +54,6 @@ typedef struct _SFMCConfig {
 } SFMCConfig;
 
 typedef struct _SFMC {
-    /* make pool and skip global to simplify critical path */
-    uint32_t pool;
-    uint32_t skip;
     /* the sFlow agent */
     SFLAgent *agent;
     /* need mutex when building sample */
@@ -310,54 +311,49 @@ static SFLMemcache_cmd sflow_map_binary_cmd(int cmd) {
 static int32_t sflow_add_random_skip(SFLSampler *sampler)
 {
     uint32_t next_skip = sfl_sampler_next_skip(sampler);
-    uint32_t prev_skip = SFMC_ATOMIC_FETCH_ADD(sfmc.skip /*sampler->skip*/, next_skip);
+    uint32_t prev_skip = SFMC_ATOMIC_FETCH_ADD(sflow_skip /*sampler->skip*/, next_skip);
     return (prev_skip + next_skip);
 }
 
 void sflow_command_start(struct conn *c) {
-    /* increment the sample_pool */
-    SFMC_ATOMIC_INC(sfmc.pool);
-    /* and decrement the countdown-to-next-sample */
-    if(unlikely(SFMC_ATOMIC_DEC(sfmc.skip) == 1)) {
-        /* skip just went from 1 to 0, so take sample. */
-        /* Relax. We are out of the critical path already. */
-        SFMC *sm = &sfmc;
-        if(sm->config &&
-           sm->config->sampling_n &&
-           sm->agent &&
-           sm->agent->samplers) {
-            SFLSampler *sampler = sm->agent->samplers;
-            /* since we are sampling at the start of the transaction
-               all we have to do here is record the wall-clock time.
-               The rest is done at the end of the transaction.
-               We could use clock_gettime(CLOCK_REALTIME) here to get
-               nanosecond resolution but it is not always implemented
-               as efficiently as gettimeofday and it's not clear that
-               that we can really do better than microsecond accuracy
-               anyway. */
-            gettimeofday(&c->sflow_start_time, NULL);
-            /* need the semaphore to protect sfl_sampler_next_skip().  We could probably
-               do this differently and avoid this mutex grab, but it shouldn't matter because
-               we are out of the critical path now. */
-            SEMLOCK_DO(sm->mutex) {
-                /* the skip counter could be something like -1 or -2 now if other threads
-                   were decrementing it while we were getting the timestamp. So rather than
-                   just set the new skip count and ignore those other decrements, we do an
-                   atomic add.
-                   In the extreme case where the new random skip is small then we might not
-                   get the skip back above 0 with this add,  and so the new skip would
-                   effectively be ~ 2^32.  Just to make sure that doesn't happen we loop
-                   until the skip is above 0 (and count any extra adds as drop-events).
-                   We could also do this simply by generating a new random number every
-                   time,  and testing it against a threshold.  The assumption here is
-                   that the atomic-decrement-and-test works out to be less expensive,
-                   and this way we get to generate our random numbers out of the critical
-                   path and with the semaphore locked.  That means we can use any random
-                   number generator we want and we don't have to worry about making the
-                   seed a thread-local variable. */
-                while(sflow_add_random_skip(sampler) < 0) {
-                    sampler->dropEvents++;
-                }
+    /* skip just went from 1 to 0, so take sample. */
+    /* Relax. We are out of the critical path already. */
+    SFMC *sm = &sfmc;
+    if(sm->config &&
+       sm->config->sampling_n &&
+       sm->agent &&
+       sm->agent->samplers) {
+        SFLSampler *sampler = sm->agent->samplers;
+        /* since we are sampling at the start of the transaction
+           all we have to do here is record the wall-clock time.
+           The rest is done at the end of the transaction.
+           We could use clock_gettime(CLOCK_REALTIME) here to get
+           nanosecond resolution but it is not always implemented
+           as efficiently as gettimeofday and it's not clear that
+           that we can really do better than microsecond accuracy
+           anyway. */
+        gettimeofday(&c->sflow_start_time, NULL);
+        /* need the semaphore to protect sfl_sampler_next_skip().  We could probably
+           do this differently and avoid this mutex grab, but it shouldn't matter because
+           we are out of the critical path now. */
+        SEMLOCK_DO(sm->mutex) {
+            /* the skip counter could be something like -1 or -2 now if other threads
+               were decrementing it while we were getting the timestamp. So rather than
+               just set the new skip count and ignore those other decrements, we do an
+               atomic add.
+               In the extreme case where the new random skip is small then we might not
+               get the skip back above 0 with this add,  and so the new skip would
+               effectively be ~ 2^32.  Just to make sure that doesn't happen we loop
+               until the skip is above 0 (and count any extra adds as drop-events).
+               We could also do this simply by generating a new random number every
+               time,  and testing it against a threshold.  The assumption here is
+               that the atomic-decrement-and-test works out to be less expensive,
+               and this way we get to generate our random numbers out of the critical
+               path and with the semaphore locked.  That means we can use any random
+               number generator we want and we don't have to worry about making the
+               seed a thread-local variable. */
+            while(sflow_add_random_skip(sampler) < 0) {
+                sampler->dropEvents++;
             }
         }
     }
@@ -381,7 +377,7 @@ void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys
     
     SFL_FLOW_SAMPLE_TYPE fs = { 0 };
     /* have to pass in the pool since we pulled it out as a global */
-    fs.sample_pool = sm->pool;
+    fs.sample_pool = sflow_sample_pool;
     
     /* indicate that I am the server by setting the
        destination interface to 0x3FFFFFFF=="internal"
@@ -838,7 +834,7 @@ static void sflow_init(SFMC *sm) {
             }
             sfl_random_init(hash);
             /* generate the first sampling skip */
-            sfmc.skip = sfl_sampler_next_skip(sampler);
+            sflow_skip = sfl_sampler_next_skip(sampler);
         }
     }
 }

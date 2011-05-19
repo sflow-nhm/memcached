@@ -34,7 +34,6 @@
 
 #include "sflow_mc.h"
 
-
 static inline void item_set_cas(const void *cookie, item *it, uint64_t cas) {
     settings.engine.v1->item_set_cas(settings.engine.v0, cookie, it, cas);
 }
