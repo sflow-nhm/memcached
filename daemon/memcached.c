@@ -859,7 +859,7 @@ void conn_set_state(conn *c, STATE_FUNC state) {
 
         if (state == conn_write || state == conn_mwrite) {
             MEMCACHED_PROCESS_COMMAND_END(c->sfd, c->wbuf, c->wbytes);
-            SFLOW_SAMPLE(c, NULL, 0, 0, -1, -1); // catch-all
+            SFLOW_SAMPLE(SFMC_CMD_OTHER, c, NULL, 0, 0, -1, -1); // catch-all
         }
     }
 }
@@ -1069,7 +1069,7 @@ static void complete_update_ascii(conn *c) {
                                         c->store_op, 0);
     }
 
-    SFLOW_SAMPLE(c, info.key, info.nkey, 0, (ret == ENGINE_SUCCESS) ? info.nbytes : -1, ret);
+    SFLOW_SAMPLE(SFMC_CMD_OTHER, c, info.key, info.nkey, 0, (ret == ENGINE_SUCCESS) ? info.nbytes : -1, ret);
 
 #ifdef ENABLE_DTRACE
     switch (c->store_op) {
@@ -1506,7 +1506,7 @@ static void complete_incr_bin(conn *c) {
                                              c->binary_header.request.vbucket);
     }
 
-    SFLOW_SAMPLE(c, key, nkey, 0, -1, ret);
+    SFLOW_SAMPLE(SFMC_CMD_OTHER, c, key, nkey, 0, -1, ret);
 
     switch (ret) {
     case ENGINE_SUCCESS:
@@ -1582,7 +1582,7 @@ static void complete_update_bin(conn *c) {
                                         c->binary_header.request.vbucket);
     }
 
-    SFLOW_SAMPLE(c, info.key, info.nkey, 0, (ret == ENGINE_SUCCESS) ? info.nbytes : -1, ret);
+    SFLOW_SAMPLE(SFMC_CMD_OTHER, c, info.key, info.nkey, 0, (ret == ENGINE_SUCCESS) ? info.nbytes : -1, ret);
     
 #ifdef ENABLE_DTRACE
     switch (c->cmd) {
@@ -1741,7 +1741,7 @@ static void process_bin_get(conn *c) {
         STATS_MISS(c, get, key, nkey);
 
         MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
-        SFLOW_SAMPLE(c, key, nkey, 1, -1, ENGINE_KEY_ENOENT); 
+        SFLOW_SAMPLE(SFMC_CMD_OTHER, c, key, nkey, 1, -1, ENGINE_KEY_ENOENT); 
 
         if (c->noreply) {
             conn_set_state(c, conn_new_cmd);
@@ -1969,6 +1969,8 @@ static void process_bin_stat(conn *c) {
                                                 append_stats);
         }
     }
+
+    SFLOW_SAMPLE(SFMC_CMD_STATS, c, NULL, 0, 0, -1, ret);
 
     switch (ret) {
     case ENGINE_SUCCESS:
@@ -3282,6 +3284,8 @@ static void process_bin_flush(conn *c) {
     ENGINE_ERROR_CODE ret;
     ret = settings.engine.v1->flush(settings.engine.v0, c, exptime);
 
+    SFLOW_SAMPLE(SFMC_CMD_FLUSH, c, NULL, 0, 0, -1, ret);
+
     if (ret == ENGINE_SUCCESS) {
         write_bin_response(c, NULL, 0, 0, 0);
     } else if (ret == ENGINE_ENOTSUP) {
@@ -3321,6 +3325,8 @@ static void process_bin_delete(conn *c) {
                                          ntohll(req->message.header.request.cas),
                                          c->binary_header.request.vbucket);
     }
+
+    SFLOW_SAMPLE(SFMC_CMD_DELETE, c, key, nkey, 0, -1, ret);
 
     /* For some reason the SLAB_INCR tries to access this... */
     item_info info = { .nvalue = 1 };
@@ -4085,7 +4091,7 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
 
                 MEMCACHED_COMMAND_GET(c->sfd, info.key, info.nkey,
                                       info.nbytes, info.cas);
-                SFLOW_SAMPLE(c, key, info.nkey, ntokens-2, info.nbytes, ret);
+                SFLOW_SAMPLE(SFMC_CMD_GET, c, key, info.nkey, ntokens-2, info.nbytes, ret);
 
                 if (return_cas)
                 {
@@ -4137,7 +4143,7 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
             } else {
                 STATS_MISS(c, get, key, nkey);
                 MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
-                SFLOW_SAMPLE(c, key, nkey, ntokens-2, -1, ENGINE_KEY_ENOENT); 
+                SFLOW_SAMPLE(SFMC_CMD_GET, c, key, nkey, ntokens-2, -1, ENGINE_KEY_ENOENT); 
             }
 
             key_token++;
@@ -4312,7 +4318,7 @@ static char* process_arithmetic_command(conn *c, token_t *tokens, const size_t n
                                              &result, 0);
     }
 
-    SFLOW_SAMPLE(c, key, nkey, 0, 0, ret);
+    SFLOW_SAMPLE(incr ? SFMC_CMD_INCR : SFMC_CMD_DECR, c, key, nkey, 0, 0, ret);
 
     char temp[INCR_MAX_STORAGE_LEN];
     switch (ret) {
@@ -4396,7 +4402,7 @@ static char *process_delete_command(conn *c, token_t *tokens,
                                          key, nkey, 0, 0);
     }
 
-    SFLOW_SAMPLE(c, key, nkey, 0, 0, ret);
+    SFLOW_SAMPLE(SFMC_CMD_DELETE, c, key, nkey, 0, 0, ret);
 
     /* For some reason the SLAB_INCR tries to access this... */
     item_info info = { .nvalue = 1 };
@@ -4443,7 +4449,7 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
         out_string(c, "ERROR");
     }
 
-    SFLOW_SAMPLE(c, NULL, 0, 0, -1, ENGINE_SUCCESS);
+    SFLOW_SAMPLE(SFMC_CMD_OTHER, c, NULL, 0, 0, -1, ENGINE_SUCCESS);
 }
 
 static char* process_command(conn *c, char *command) {

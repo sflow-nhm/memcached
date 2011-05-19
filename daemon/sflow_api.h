@@ -96,6 +96,7 @@ typedef enum  {
   SFMC_PROT_BINARY  = 2,
 } SFLMemcache_prot;
 
+#if 0 /* this one moved to sflow_mc.h to expose it to memcached.c */
 typedef enum  {
   SFMC_CMD_OTHER    = 0,
   SFMC_CMD_SET      = 1,
@@ -114,6 +115,7 @@ typedef enum  {
   SFMC_CMD_VERSION  = 14,
   SFMC_CMD_QUIT     = 15,
 } SFLMemcache_cmd;
+#endif
 
 typedef enum  {
   SFMC_OP_UNKNOWN      = 0,

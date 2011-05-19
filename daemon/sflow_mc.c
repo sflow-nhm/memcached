@@ -359,7 +359,7 @@ void sflow_command_start(struct conn *c) {
     }
 }
         
-void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys, size_t value_bytes, int status)
+void sflow_sample(SFLMemcache_cmd command, struct conn *c, const void *key, size_t keylen, uint32_t nkeys, size_t value_bytes, int status)
 {
     SFMC *sm = &sfmc;
     if(sm->config == NULL ||
@@ -388,17 +388,19 @@ void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys
     mcopElem.tag = SFLFLOW_MEMCACHE;
     mcopElem.flowType.memcache.protocol = sflow_map_protocol(c->protocol);
 
-    if(c->protocol == binary_prot) {
-        /* binary protocol has c->cmd */
-        mcopElem.flowType.memcache.command = sflow_map_binary_cmd(c->cmd);
+    // sometimes we pass the command in explicitly
+    // otherwise we allow it to be inferred
+    if(command == SFMC_CMD_OTHER) {
+        if(c->protocol == binary_prot) {
+            /* binary protocol has c->cmd */
+            command = sflow_map_binary_cmd(c->cmd);
+        }
+        else {
+            /* ascii protocol - infer cmd from the store_op */
+            command = sflow_map_ascii_op(c->store_op);
+        }
     }
-    else {
-        /* ascii protocol - infer cmd from the store_op $$$
-           this may not work very well - may need to either pass
-           the ascii command in as a parameter here or else add
-           a new var to struct conn to hold it */
-        mcopElem.flowType.memcache.command = sflow_map_ascii_op(c->store_op);
-    }
+    mcopElem.flowType.memcache.command = command;
 
     mcopElem.flowType.memcache.key.str = (char *)key;
     mcopElem.flowType.memcache.key.len = (key ? keylen : 0);
