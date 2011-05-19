@@ -10,14 +10,19 @@
 #ifdef ENABLE_SFLOW
 void sflow_tick(rel_time_t now);
 void sflow_command_start(struct conn *c);
-void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys, size_t value_bytes, uint32_t status);
+void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys, size_t value_bytes, int status);
 #define SFLOW_TICK(now) sflow_tick(now)
 #define SFLOW_COMMAND_START(c) sflow_command_start(c)
-#define SFLOW_SAMPLE(c, key, keylen, nkeys, bytes, status) sflow_sample(c, key, keylen, nkeys, bytes, status)
+#define SFLOW_SAMPLE(c, key, keylen, nkeys, bytes, status)		\
+  do {									\
+    if(unlikely((c)->sflow_start_time.tv_sec)) {			\
+      sflow_sample((c), (key), (keylen), (nkeys), (bytes), (status));	\
+    }									\
+  } while(0)
 #else
 #define SFLOW_TICK(now)
 #define SFLOW_COMMAND_START(c)
-#define SFLOW_SAMPLE(c, key, keylen, nkeys, bytes, status)
+#define SFLOW_SAMPLE(c, key, keylen, nkeys, bytes, slab_op)
 #endif
 
 #endif /* SFLOW_MC_H */

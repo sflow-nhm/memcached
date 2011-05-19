@@ -70,9 +70,9 @@ typedef struct _SFMC {
     int socket6;
 } SFMC;
 
-#define SFMC_ATOMIC_ADD(_c, _inc) __sync_fetch_and_add(&(_c), (_inc))
-#define SFMC_ATOMIC_INC(_c) SFMC_ATOMIC_ADD((_c), 1)
-#define SFMC_ATOMIC_DEC(_c) SFMC_ATOMIC_ADD((_c), -1)
+#define SFMC_ATOMIC_FETCH_ADD(_c, _inc) __sync_fetch_and_add(&(_c), (_inc))
+#define SFMC_ATOMIC_INC(_c) SFMC_ATOMIC_FETCH_ADD((_c), 1)
+#define SFMC_ATOMIC_DEC(_c) SFMC_ATOMIC_FETCH_ADD((_c), -1)
 
 #define SFLOW_DURATION_UNKNOWN 0
 
@@ -137,92 +137,96 @@ static void aggregate_callback(void *in, void *out) {
 static void sfmc_cb_counters(void *magic, SFLPoller *poller, SFL_COUNTERS_SAMPLE_TYPE *cs)
 {
     SFMC *sm = (SFMC *)poller->magic;
-    SEMLOCK_DO(sm->mutex) {
         
-        if(sm->config == NULL) {
-            /* config is disabled */
-            return;
-        }
-        
-        if(sm->config->polling_secs == 0) {
-            /* polling is off */
-            return;
-        }
+    if(sm->config == NULL ||
+       sm->config->polling_secs == 0) {
+        /* not configured */
+        return;
+    }
 
-        SFLCounters_sample_element mcElem = { 0 };
-        mcElem.tag = SFLCOUNTERS_MEMCACHE;
+    SFLCounters_sample_element mcElem = { 0 };
+    mcElem.tag = SFLCOUNTERS_MEMCACHE;
 
-        struct thread_stats thread_stats;
-        memset(&thread_stats, 0, sizeof(thread_stats));
-        if(settings.engine.v1->aggregate_stats != NULL) {
-            settings.engine.v1->aggregate_stats(settings.engine.v0,
-                                                NULL, // no cookie! $$$
-                                                aggregate_callback,
-                                                &thread_stats);
-        }
-        else if (settings.engine.v1->get_stats_struct != NULL) {
-            struct independent_stats *independent_stats = settings.engine.v1->get_stats_struct(settings.engine.v0,
-                                                                                               NULL/* no cookie ! $$$*/);
-            threadlocal_stats_aggregate(independent_stats->thread_stats, &thread_stats);
-        }
-        else if(settings.engine.v1->get_stats != NULL) {
-            // this one seems to return ASCII - not ideal
-            // might need to implement the get_stats_struct method for the default engine $$$
-        }
-        else {
-            // default_independent_stats not exported from memcached.c
-        }
+    struct thread_stats thread_stats;
+    memset(&thread_stats, 0, sizeof(thread_stats));
+    if(settings.engine.v1->aggregate_stats != NULL) {
+        settings.engine.v1->aggregate_stats(settings.engine.v0,
+                                            NULL,
+                                            aggregate_callback,
+                                            &thread_stats);
+    }
+    else if (settings.engine.v1->get_stats_struct != NULL) {
+        struct independent_stats *independent_stats = settings.engine.v1->get_stats_struct(settings.engine.v0, NULL);
+        threadlocal_stats_aggregate(independent_stats->thread_stats, &thread_stats);
+    }
+    else if(settings.engine.v1->get_stats != NULL) {
+        // this one seems to return ASCII - not ideal
+        // TODO: implement the .get_stats_struct method for the default engine
+    }
+    else {
+        // default_independent_stats not exported from memcached.c
+    }
 
-        // aggregate all the slab stats together too
-        struct slab_stats slab_stats;
-        slab_stats_aggregate(&thread_stats, &slab_stats);
-
+    // aggregate all the slab stats together
+    struct slab_stats slab_stats;
+    slab_stats_aggregate(&thread_stats, &slab_stats);
+    
 #ifndef WIN32
-        struct rusage usage;
-        getrusage(RUSAGE_SELF, &usage);
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
 #endif /* !WIN32 */
 
-        STATS_LOCK(); // $$$ necessary?
-        mcElem.counterBlock.memcache.uptime = sm->tick;  // seconds - is that right? $$$
+    mcElem.counterBlock.memcache.uptime = sm->tick;
 
 #ifdef WIN32
-        mcElem.counterBlock.memcache.rusage_user = 0xFFFFFFFF;
-        mcElem.counterBlock.memcache.rusage_system = 0xFFFFFFFF;
+    mcElem.counterBlock.memcache.rusage_user = 0xFFFFFFFF;
+    mcElem.counterBlock.memcache.rusage_system = 0xFFFFFFFF;
 #else
-        mcElem.counterBlock.memcache.rusage_user = (usage.ru_utime.tv_sec * 1000) + (usage.ru_utime.tv_usec / 1000);
-        mcElem.counterBlock.memcache.rusage_system = (usage.ru_stime.tv_sec * 1000) + (usage.ru_stime.tv_usec / 1000);
+    mcElem.counterBlock.memcache.rusage_user = (usage.ru_utime.tv_sec * 1000) + (usage.ru_utime.tv_usec / 1000);
+    mcElem.counterBlock.memcache.rusage_system = (usage.ru_stime.tv_sec * 1000) + (usage.ru_stime.tv_usec / 1000);
 #endif /* WIN32 */
 
-        mcElem.counterBlock.memcache.curr_connections = stats.curr_conns - 1;
-        mcElem.counterBlock.memcache.total_connections = stats.total_conns;
-        mcElem.counterBlock.memcache.connection_structures = stats.conn_structs;
-        mcElem.counterBlock.memcache.cmd_get = thread_stats.cmd_get;
-        mcElem.counterBlock.memcache.cmd_set = slab_stats.cmd_set;
-        mcElem.counterBlock.memcache.cmd_flush = thread_stats.cmd_flush;
-        mcElem.counterBlock.memcache.get_hits = slab_stats.get_hits;
-        mcElem.counterBlock.memcache.get_misses = thread_stats.get_misses;
-        mcElem.counterBlock.memcache.delete_misses = thread_stats.delete_misses;
-        mcElem.counterBlock.memcache.delete_hits = slab_stats.delete_hits;
-        mcElem.counterBlock.memcache.incr_misses = thread_stats.incr_misses;
-        mcElem.counterBlock.memcache.incr_hits = thread_stats.incr_hits;
-        mcElem.counterBlock.memcache.decr_misses = thread_stats.decr_misses;
-        mcElem.counterBlock.memcache.decr_hits = thread_stats.decr_hits;
-        mcElem.counterBlock.memcache.cas_misses = thread_stats.cas_misses;
-        mcElem.counterBlock.memcache.cas_hits = slab_stats.cas_hits;
-        mcElem.counterBlock.memcache.cas_badval = slab_stats.cas_badval;
-        mcElem.counterBlock.memcache.auth_cmds = thread_stats.auth_cmds;
-        mcElem.counterBlock.memcache.auth_errors = thread_stats.auth_errors;
-        mcElem.counterBlock.memcache.bytes_read = thread_stats.bytes_read;
-        mcElem.counterBlock.memcache.bytes_written = thread_stats.bytes_written;
-        mcElem.counterBlock.memcache.limit_maxbytes = settings.maxbytes;
-        // $$$ mcElem.counterBlock.memcache.accepting_conns = stats.accepting_conns;
-        // $$$ mcElem.counterBlock.memcache.listen_disabled_num = stats.listen_disabled_num;
-        mcElem.counterBlock.memcache.threads = settings.num_threads;
-        mcElem.counterBlock.memcache.conn_yields = thread_stats.conn_yields;
-        STATS_UNLOCK();
-        SFLADD_ELEMENT(cs, &mcElem);
+    mcElem.counterBlock.memcache.curr_connections = stats.curr_conns - 1;
+    mcElem.counterBlock.memcache.total_connections = stats.total_conns;
+    mcElem.counterBlock.memcache.connection_structures = stats.conn_structs;
+    mcElem.counterBlock.memcache.cmd_get = thread_stats.cmd_get;
+    mcElem.counterBlock.memcache.cmd_set = slab_stats.cmd_set;
+    mcElem.counterBlock.memcache.cmd_flush = thread_stats.cmd_flush;
+    mcElem.counterBlock.memcache.get_hits = slab_stats.get_hits;
+    mcElem.counterBlock.memcache.get_misses = thread_stats.get_misses;
+    mcElem.counterBlock.memcache.delete_misses = thread_stats.delete_misses;
+    mcElem.counterBlock.memcache.delete_hits = slab_stats.delete_hits;
+    mcElem.counterBlock.memcache.incr_misses = thread_stats.incr_misses;
+    mcElem.counterBlock.memcache.incr_hits = thread_stats.incr_hits;
+    mcElem.counterBlock.memcache.decr_misses = thread_stats.decr_misses;
+    mcElem.counterBlock.memcache.decr_hits = thread_stats.decr_hits;
+    mcElem.counterBlock.memcache.cas_misses = thread_stats.cas_misses;
+    mcElem.counterBlock.memcache.cas_hits = slab_stats.cas_hits;
+    mcElem.counterBlock.memcache.cas_badval = slab_stats.cas_badval;
+    mcElem.counterBlock.memcache.auth_cmds = thread_stats.auth_cmds;
+    mcElem.counterBlock.memcache.auth_errors = thread_stats.auth_errors;
+    mcElem.counterBlock.memcache.bytes_read = thread_stats.bytes_read;
+    mcElem.counterBlock.memcache.bytes_written = thread_stats.bytes_written;
+    mcElem.counterBlock.memcache.limit_maxbytes = settings.maxbytes;
+    // mcElem.counterBlock.memcache.accepting_conns = is_listen_disabled() ? 0 : 1; // $$$ static fn in memcached.c 
+    // mcElem.counterBlock.memcache.listen_disabled_num = get_listen_disabled_num(); // $$$ static fn in memcached.c
+    mcElem.counterBlock.memcache.threads = settings.num_threads;
+    mcElem.counterBlock.memcache.conn_yields = thread_stats.conn_yields;
+    SFLADD_ELEMENT(cs, &mcElem);
+    SEMLOCK_DO(sm->mutex) {
         sfl_poller_writeCountersSample(poller, cs);
     }
+}
+
+static SFLMemcache_prot sflow_map_protocol(enum protocol prot) {
+    SFLMemcache_prot sflprot = SFMC_PROT_OTHER;
+    switch(prot) {
+    case ascii_prot: sflprot = SFMC_PROT_ASCII; break;
+    case binary_prot: sflprot = SFMC_PROT_BINARY; break;
+    case negotiating_prot:
+    default: break;
+    }
+    return sflprot;
 }
 
 static SFLMemcache_operation_status sflow_map_status(int ret) {
@@ -236,16 +240,67 @@ static SFLMemcache_operation_status sflow_map_status(int ret) {
     return sflret;
 }
 
-static SFLMemcache_cmd sflow_map_cmd(int cmd) {
+static SFLMemcache_cmd sflow_map_ascii_op(int op) {
     SFLMemcache_cmd sflcmd = SFMC_CMD_OTHER;
-    switch(cmd) {
+    switch(op) {
     case OPERATION_ADD: sflcmd=SFMC_CMD_ADD; break;
     case OPERATION_REPLACE: sflcmd = SFMC_CMD_REPLACE; break;
     case OPERATION_APPEND: sflcmd = SFMC_CMD_APPEND; break;
     case OPERATION_PREPEND: sflcmd = SFMC_CMD_PREPEND; break;
     case OPERATION_SET: sflcmd = SFMC_CMD_SET; break;
     case OPERATION_CAS: sflcmd = SFMC_CMD_CAS; break;
-        // $$$ add more here
+        /*            SFMC_CMD_GET */
+        /*             SFMC_CMD_GETS */
+        /*             SFMC_CMD_INCR */
+        /*             SFMC_CMD_DECR */
+        /*             SFMC_CMD_DELETE */
+        /*             SFMC_CMD_STATS */
+        /*             SFMC_CMD_FLUSH */
+        /*             SFMC_CMD_VERSION */
+        /*             SFMC_CMD_QUIT */
+    default:
+        break;
+    }
+    return sflcmd;
+}
+
+static SFLMemcache_cmd sflow_map_binary_cmd(int cmd) {
+    SFLMemcache_cmd sflcmd = SFMC_CMD_OTHER;
+    switch(cmd) {
+    case PROTOCOL_BINARY_CMD_GET: sflcmd = SFMC_CMD_GET; break;
+    case PROTOCOL_BINARY_CMD_SET: sflcmd = SFMC_CMD_SET; break;
+    case PROTOCOL_BINARY_CMD_ADD: sflcmd = SFMC_CMD_ADD; break;
+    case PROTOCOL_BINARY_CMD_REPLACE: sflcmd = SFMC_CMD_REPLACE; break;
+    case PROTOCOL_BINARY_CMD_DELETE: sflcmd = SFMC_CMD_DELETE; break;
+    case PROTOCOL_BINARY_CMD_INCREMENT: sflcmd = SFMC_CMD_INCR; break;
+    case PROTOCOL_BINARY_CMD_DECREMENT: sflcmd = SFMC_CMD_DECR; break;
+    case PROTOCOL_BINARY_CMD_QUIT: sflcmd = SFMC_CMD_QUIT; break;
+    case PROTOCOL_BINARY_CMD_FLUSH: sflcmd = SFMC_CMD_FLUSH; break;
+    case PROTOCOL_BINARY_CMD_GETQ: break;
+    case PROTOCOL_BINARY_CMD_NOOP: break;
+    case PROTOCOL_BINARY_CMD_VERSION: sflcmd = SFMC_CMD_VERSION; break;
+    case PROTOCOL_BINARY_CMD_GETK: break;
+    case PROTOCOL_BINARY_CMD_GETKQ: break;
+    case PROTOCOL_BINARY_CMD_APPEND: sflcmd = SFMC_CMD_APPEND; break;
+    case PROTOCOL_BINARY_CMD_PREPEND: sflcmd = SFMC_CMD_PREPEND; break;
+    case PROTOCOL_BINARY_CMD_STAT: sflcmd = SFMC_CMD_STATS; break;
+    case PROTOCOL_BINARY_CMD_SETQ: break;
+    case PROTOCOL_BINARY_CMD_ADDQ: break;
+    case PROTOCOL_BINARY_CMD_REPLACEQ: break;
+    case PROTOCOL_BINARY_CMD_DELETEQ: break;
+    case PROTOCOL_BINARY_CMD_INCREMENTQ: break;
+    case PROTOCOL_BINARY_CMD_DECREMENTQ: break;
+    case PROTOCOL_BINARY_CMD_QUITQ: break;
+    case PROTOCOL_BINARY_CMD_FLUSHQ: break;
+    case PROTOCOL_BINARY_CMD_APPENDQ: break;
+    case PROTOCOL_BINARY_CMD_PREPENDQ: break;
+    case PROTOCOL_BINARY_CMD_VERBOSITY: break;
+    case PROTOCOL_BINARY_CMD_TOUCH: break;
+    case PROTOCOL_BINARY_CMD_GAT: break;
+    case PROTOCOL_BINARY_CMD_GATQ: break;
+    case PROTOCOL_BINARY_CMD_SASL_LIST_MECHS: break;
+    case PROTOCOL_BINARY_CMD_SASL_AUTH: break;
+    case PROTOCOL_BINARY_CMD_SASL_STEP: break;
     default:
         break;
     }
@@ -255,7 +310,7 @@ static SFLMemcache_cmd sflow_map_cmd(int cmd) {
 static int32_t sflow_add_random_skip(SFLSampler *sampler)
 {
     uint32_t next_skip = sfl_sampler_next_skip(sampler);
-    uint32_t prev_skip = SFMC_ATOMIC_ADD(sfmc.skip, next_skip);
+    uint32_t prev_skip = SFMC_ATOMIC_FETCH_ADD(sfmc.skip /*sampler->skip*/, next_skip);
     return (prev_skip + next_skip);
 }
 
@@ -263,84 +318,92 @@ void sflow_command_start(struct conn *c) {
     /* increment the sample_pool */
     SFMC_ATOMIC_INC(sfmc.pool);
     /* and decrement the countdown-to-next-sample */
-    if(SFMC_ATOMIC_DEC(sfmc.skip) == 1) {
-        /* skip just went from 1 to 0, so take sample */
-        /* We are out of the critical path already. */
+    if(unlikely(SFMC_ATOMIC_DEC(sfmc.skip) == 1)) {
+        /* skip just went from 1 to 0, so take sample. */
+        /* Relax. We are out of the critical path already. */
         SFMC *sm = &sfmc;
-        if(sm->config && sm->config->sampling_n && sm->agent) {
+        if(sm->config &&
+           sm->config->sampling_n &&
+           sm->agent &&
+           sm->agent->samplers) {
             SFLSampler *sampler = sm->agent->samplers;
-            if(sampler) {
-                /* since we are sampling at the start of the transaction
-                   all we have to do here is record the wall-clock time.
-                   The rest is done at the end of the transaction.
-                   We could use clock_gettime(CLOCK_REALTIME) here to get
-                   nanosecond resolution but it is not always implemented
-                   as efficiently as gettimeofday and it's not clear that
-                   that we can really do better than microsecond accuracy
-                   anyway. */
-                gettimeofday(&c->sflow_start_time, NULL);
-                /* need the semaphore to protect sfl_sampler_next_skip().  We could probably
-                   do this differently and avoid this mutex grab, but it shouldn't matter because
-                   we are out of the critical path now. */
-                SEMLOCK_DO(sm->mutex) {
-                    /* the skip counter could be something like -1 or -2 now if other threads were decrementing
-                       it while we were getting the timestamp. So rather than just set the new skip count and ignore those
-                       other decrements, we do an atomic add.
-                       In the extreme case where the new random skip is small then we might not get the skip back above 0
-                       with this add,  and so the new skip would effectively be ~ 2^32.  Just to make sure that doesn't
-                       happen we loop until the skip is above 0 (and count any extra adds as drop-events). */
-                    /* one advantage of this approach is that we only have to generate a new random number when we
-                       take a sample,  and because we have the mutex locked we don't need to make the random number
-                       seed a thread-local variable. */
-                    while(sflow_add_random_skip(sampler) < 0) {
-                        sampler->dropEvents++;
-                    }
+            /* since we are sampling at the start of the transaction
+               all we have to do here is record the wall-clock time.
+               The rest is done at the end of the transaction.
+               We could use clock_gettime(CLOCK_REALTIME) here to get
+               nanosecond resolution but it is not always implemented
+               as efficiently as gettimeofday and it's not clear that
+               that we can really do better than microsecond accuracy
+               anyway. */
+            gettimeofday(&c->sflow_start_time, NULL);
+            /* need the semaphore to protect sfl_sampler_next_skip().  We could probably
+               do this differently and avoid this mutex grab, but it shouldn't matter because
+               we are out of the critical path now. */
+            SEMLOCK_DO(sm->mutex) {
+                /* the skip counter could be something like -1 or -2 now if other threads
+                   were decrementing it while we were getting the timestamp. So rather than
+                   just set the new skip count and ignore those other decrements, we do an
+                   atomic add.
+                   In the extreme case where the new random skip is small then we might not
+                   get the skip back above 0 with this add,  and so the new skip would
+                   effectively be ~ 2^32.  Just to make sure that doesn't happen we loop
+                   until the skip is above 0 (and count any extra adds as drop-events).
+                   We could also do this simply by generating a new random number every
+                   time,  and testing it against a threshold.  The assumption here is
+                   that the atomic-decrement-and-test works out to be less expensive,
+                   and this way we get to generate our random numbers out of the critical
+                   path and with the semaphore locked.  That means we can use any random
+                   number generator we want and we don't have to worry about making the
+                   seed a thread-local variable. */
+                while(sflow_add_random_skip(sampler) < 0) {
+                    sampler->dropEvents++;
                 }
             }
         }
     }
 }
         
-void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys, size_t value_bytes, uint32_t status)
+void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys, size_t value_bytes, int status)
 {
     SFMC *sm = &sfmc;
-
-    if(c->sflow_start_time.tv_sec == 0) return; // not sampling this one ($$$ pull out into macro above)
-    
-    if(sm->config == NULL) {
-        /* config is disabled */
+    if(sm->config == NULL ||
+       sm->config->sampling_n == 0 ||
+       sm->agent == NULL ||
+       sm->agent->samplers == NULL) {
+        /* sFlow not configured yet - may be waiting for DNS-SD request */
         return;
     }
-            
-    if(sm->config->sampling_n == 0) {
-        /* sampling is off */
-        return;
-    }
-
     SFLSampler *sampler = sm->agent->samplers;
-    if(sampler == NULL) {
-        return;
-    }
-    
     struct timeval timenow,elapsed;
     gettimeofday(&timenow, NULL);
     timersub(&timenow, &c->sflow_start_time, &elapsed);
     timerclear(&c->sflow_start_time);
-
-    SFL_FLOW_SAMPLE_TYPE fs = { 0 };
     
-    /* pass in the pool since we made it global */
+    SFL_FLOW_SAMPLE_TYPE fs = { 0 };
+    /* have to pass in the pool since we pulled it out as a global */
     fs.sample_pool = sm->pool;
     
     /* indicate that I am the server by setting the
        destination interface to 0x3FFFFFFF=="internal"
-           and leaving the source interface as 0=="unknown" */
+       and leaving the source interface as 0=="unknown" */
     fs.output = 0x3FFFFFFF;
-    
+            
     SFLFlow_sample_element mcopElem = { 0 };
     mcopElem.tag = SFLFLOW_MEMCACHE;
-    mcopElem.flowType.memcache.protocol = IS_UDP(c->protocol) ? SFMC_PROT_ASCII : SFMC_PROT_BINARY;
-    mcopElem.flowType.memcache.command = sflow_map_cmd(c->cmd);
+    mcopElem.flowType.memcache.protocol = sflow_map_protocol(c->protocol);
+
+    if(c->protocol == binary_prot) {
+        /* binary protocol has c->cmd */
+        mcopElem.flowType.memcache.command = sflow_map_binary_cmd(c->cmd);
+    }
+    else {
+        /* ascii protocol - infer cmd from the store_op $$$
+           this may not work very well - may need to either pass
+           the ascii command in as a parameter here or else add
+           a new var to struct conn to hold it */
+        mcopElem.flowType.memcache.command = sflow_map_ascii_op(c->store_op);
+    }
+
     mcopElem.flowType.memcache.key.str = (char *)key;
     mcopElem.flowType.memcache.key.len = (key ? keylen : 0);
     mcopElem.flowType.memcache.nkeys = (nkeys == 0) ? 1 : nkeys;
@@ -384,7 +447,7 @@ void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys
             socElem.flowType.socket4.remote_ip.addr = soc4->sin_addr.s_addr;
             socElem.flowType.socket4.local_port = ntohs(lsoc4->sin_port);
             socElem.flowType.socket4.remote_port = ntohs(soc4->sin_port);
-            }
+        }
         else if(peersoclen == sizeof(*soc6) && soc6->sin6_family == AF_INET6) {
             struct sockaddr_in6 *lsoc6 = (struct sockaddr_in6 *)&localsoc;
             socElem.tag = SFLFLOW_EX_SOCKET6;
@@ -401,7 +464,6 @@ void sflow_sample(struct conn *c, const void *key, size_t keylen, uint32_t nkeys
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, c, "unexpected socket length or address family");
         }
     }
-    
     
     SEMLOCK_DO(sm->mutex) {
         sfl_sampler_writeFlowSample(sampler, &fs);
@@ -503,7 +565,7 @@ static bool sfmc_lookupAddress(char *name, struct sockaddr *sa, SFLAddress *addr
             }
             break;
         default:
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL, "get addrinfo: unexpected address family: %d", info->ai_family);
+            settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL, "getaddrinfo: unexpected address family: %d", info->ai_family);
             return false;
             break;
         }

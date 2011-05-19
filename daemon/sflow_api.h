@@ -360,7 +360,7 @@ typedef struct _SFLSampler {
 /* declare */
 struct _SFLPoller;
 
-typedef void (*getCountersFn_t)(void *magic,                   /* callback to get counters */
+typedef void (*getCountersFn_t)(void *magic,   /* callback to get counters */
 				struct _SFLPoller *sampler,    /* called with self */
 				SFL_COUNTERS_SAMPLE_TYPE *cs); /* struct to fill in */
 
@@ -376,19 +376,19 @@ typedef struct _SFLPoller {
   uint32_t countersSampleSeqNo;
 } SFLPoller;
 
-typedef void *(*allocFn_t)(void *magic,               /* callback to allocate space on heap */
+typedef void *(*allocFn_t)(void *magic,   /* callback to allocate space on heap */
 			   struct _SFLAgent *agent,   /* called with self */
 			   size_t bytes);             /* bytes requested */
 
-typedef int (*freeFn_t)(void *magic,                  /* callback to free space on heap */
+typedef int (*freeFn_t)(void *magic,      /* callback to free space on heap */
 			struct _SFLAgent *agent,      /* called with self */
 			void *obj);                   /* obj to free */
 
-typedef void (*errorFn_t)(void *magic,                /* callback to log error message */
+typedef void (*errorFn_t)(void *magic,    /* callback to log error message */
 			  struct _SFLAgent *agent,    /* called with self */
 			  char *msg);                 /* error message */
 
-typedef void (*sendFn_t)(void *magic,                 /* optional override fn to send packet */
+typedef void (*sendFn_t)(void *magic,     /* optional override fn to send packet */
 			 struct _SFLAgent *agent,
 			 SFLReceiver *receiver,
 			 u_char *pkt,
@@ -412,7 +412,7 @@ typedef struct _SFLAgent {
 /* call this at the start with a newly created agent */
 void sfl_agent_init(SFLAgent *agent,
 		    SFLAddress *myIP, /* IP address of this agent */
-		    uint32_t subId,  /* agent_sub_id */
+		    uint32_t subId,   /* agent_sub_id */
 		    time_t bootTime,  /* agent boot time */
 		    time_t now,       /* time now */
 		    void *magic,      /* ptr to pass back in logging and alloc fns */
@@ -471,27 +471,5 @@ void sfl_poller_writeCountersSample(SFLPoller *poller, SFL_COUNTERS_SAMPLE_TYPE 
 
 /* call this to deallocate resources */
 void sfl_agent_release(SFLAgent *agent);
-
-
-/* internal fns */
-
-void sfl_receiver_init(SFLReceiver *receiver, SFLAgent *agent);
-void sfl_sampler_init(SFLSampler *sampler, SFLAgent *agent, SFLDataSource_instance *pdsi);
-void sfl_poller_init(SFLPoller *poller, SFLAgent *agent, SFLDataSource_instance *pdsi, void *magic, getCountersFn_t getCountersFn);
-
-
-void sfl_receiver_tick(SFLReceiver *receiver, time_t now);
-void sfl_poller_tick(SFLPoller *poller, time_t now);
-
-int sfl_receiver_writeFlowSample(SFLReceiver *receiver, SFL_FLOW_SAMPLE_TYPE *fs);
-int sfl_receiver_writeCountersSample(SFLReceiver *receiver, SFL_COUNTERS_SAMPLE_TYPE *cs);
-
-void sfl_agent_error(SFLAgent *agent, char *modName, char *msg);
-void sfl_agent_sysError(SFLAgent *agent, char *modName, char *msg);
-
-uint32_t sfl_receiver_samplePacketsSent(SFLReceiver *receiver);
-
-#define SFL_ALLOC malloc
-#define SFL_FREE free
 
 #endif /* SFLOW_API_H */

@@ -4,6 +4,19 @@
 
 #include "sflow_api.h"
 
+/* internal fns */
+static void sfl_receiver_init(SFLReceiver *receiver, SFLAgent *agent);
+static void sfl_sampler_init(SFLSampler *sampler, SFLAgent *agent, SFLDataSource_instance *pdsi);
+static void sfl_poller_init(SFLPoller *poller, SFLAgent *agent, SFLDataSource_instance *pdsi, void *magic, getCountersFn_t getCountersFn);
+static void sfl_receiver_tick(SFLReceiver *receiver, time_t now);
+static void sfl_poller_tick(SFLPoller *poller, time_t now);
+static int sfl_receiver_writeFlowSample(SFLReceiver *receiver, SFL_FLOW_SAMPLE_TYPE *fs);
+static int sfl_receiver_writeCountersSample(SFLReceiver *receiver, SFL_COUNTERS_SAMPLE_TYPE *cs);
+static void sfl_agent_error(SFLAgent *agent, char *modName, char *msg);
+
+#define SFL_ALLOC malloc
+#define SFL_FREE free
+
 /* ===================================================*/
 /* ===================== AGENT =======================*/
 
@@ -34,25 +47,10 @@ static void sflFree(SFLAgent *agent, void *obj)
 */
 #define MAX_ERRMSG_LEN 1000
 
-void sfl_agent_error(SFLAgent *agent, char *modName, char *msg)
+static void sfl_agent_error(SFLAgent *agent, char *modName, char *msg)
 {
     char errm[MAX_ERRMSG_LEN];
     sprintf(errm, "sfl_agent_error: %s: %s\n", modName, msg);
-    if(agent->errorFn) (*agent->errorFn)(agent->magic, agent, errm);
-    else {
-        fprintf(stderr, "%s\n", errm);
-        fflush(stderr);
-    }
-}
-
-void sfl_agent_sysError(SFLAgent *agent, char *modName, char *msg)
-{
-    char errm[MAX_ERRMSG_LEN];
-    sprintf(errm, "sfl_agent_sysError: %s: %s (errno = %d - %s)\n",
-            modName,
-            msg,
-            errno,
-            strerror(errno));
     if(agent->errorFn) (*agent->errorFn)(agent->magic, agent, errm);
     else {
         fprintf(stderr, "%s\n", errm);
@@ -67,7 +65,7 @@ void sfl_agent_sysError(SFLAgent *agent, char *modName, char *msg)
 
 void sfl_agent_init(SFLAgent *agent,
                     SFLAddress *myIP, /* IP address of this agent in net byte order */
-                    uint32_t subId,  /* agent_sub_id */
+                    uint32_t subId,   /* agent_sub_id */
                     time_t bootTime,  /* agent boot time */
                     time_t now,       /* time now */
                     void *magic,      /* ptr to pass back in logging and alloc fns */
@@ -246,7 +244,7 @@ SFLPoller *sfl_agent_addPoller(SFLAgent *agent,
   -----------------__________________________------------------
 */
 
-void sfl_sampler_init(SFLSampler *sampler, SFLAgent *agent, SFLDataSource_instance *pdsi)
+static void sfl_sampler_init(SFLSampler *sampler, SFLAgent *agent, SFLDataSource_instance *pdsi)
 {
     /* copy the dsi in case it points to sampler->dsi, which we are about to clear.
        (Thanks to Jagjit Choudray of Force 10 Networks for pointing out this bug) */
@@ -346,7 +344,7 @@ uint32_t sfl_sampler_next_skip(SFLSampler *sampler) {
   -----------------__________________________------------------
 */
 
-void sfl_poller_init(SFLPoller *poller,
+static void sfl_poller_init(SFLPoller *poller,
                      SFLAgent *agent,
                      SFLDataSource_instance *pdsi,
                      void *magic,         /* ptr to pass back in getCountersFn() */
@@ -384,8 +382,8 @@ uint32_t sfl_poller_get_sFlowCpInterval(SFLPoller *poller) {
 void sfl_poller_set_sFlowCpInterval(SFLPoller *poller, uint32_t sFlowCpInterval) {
     poller->sFlowCpInterval = sFlowCpInterval;
     /* Set the countersCountdown to be a randomly selected value between 1 and
-       sFlowCpInterval. That way the counter polling would be desynchronised
-       (on a 200-port switch, polling all the counters in one second could be harmful). */
+       sFlowCpInterval. That way the counter polling would be desynchronised even
+       if everything came up at the same instant. */
     poller->countersCountdown = sfl_random(sFlowCpInterval);
 }
 
@@ -402,7 +400,7 @@ void sfl_poller_resetCountersSeqNo(SFLPoller *poller) {  poller->countersSampleS
   -----------------___________________________------------------
 */
 
-void sfl_poller_tick(SFLPoller *poller, time_t now)
+static void sfl_poller_tick(SFLPoller *poller, time_t now)
 {
     if(poller->countersCountdown == 0) return; /* counters retrieval was not enabled */
 
@@ -452,7 +450,7 @@ static void putAddress(SFLReceiver *receiver, SFLAddress *addr);
   -----------------__________________________------------------
 */
 
-void sfl_receiver_init(SFLReceiver *receiver, SFLAgent *agent)
+static void sfl_receiver_init(SFLReceiver *receiver, SFLAgent *agent)
 {
     /* first clear everything */
     memset(receiver, 0, sizeof(*receiver));
@@ -486,7 +484,7 @@ void sfl_receiver_set_sFlowRcvrMaximumDatagramSize(SFLReceiver *receiver, uint32
   -----------------___________________________------------------
 */
 
-void sfl_receiver_tick(SFLReceiver *receiver, time_t now)
+static void sfl_receiver_tick(SFLReceiver *receiver, time_t now)
 {
     /* if there are any samples to send, flush them now */
     if(receiver->sampleCollector.numSamples > 0) sendSample(receiver);
@@ -621,7 +619,7 @@ static int computeFlowSampleSize(SFLReceiver *receiver, SFL_FLOW_SAMPLE_TYPE *fs
   -----------------_______________________________------------------
 */
 
-int sfl_receiver_writeFlowSample(SFLReceiver *receiver, SFL_FLOW_SAMPLE_TYPE *fs)
+static int sfl_receiver_writeFlowSample(SFLReceiver *receiver, SFL_FLOW_SAMPLE_TYPE *fs)
 {
     int packedSize;
     SFLFlow_sample_element *elem;
@@ -744,7 +742,7 @@ static int computeCountersSampleSize(SFLReceiver *receiver, SFL_COUNTERS_SAMPLE_
   -----------------__________________________________------------------
 */
 
-int sfl_receiver_writeCountersSample(SFLReceiver *receiver, SFL_COUNTERS_SAMPLE_TYPE *cs)
+static int sfl_receiver_writeCountersSample(SFLReceiver *receiver, SFL_COUNTERS_SAMPLE_TYPE *cs)
 {
     int packedSize;
     SFLCounters_sample_element *elem;
@@ -841,16 +839,6 @@ int sfl_receiver_writeCountersSample(SFLReceiver *receiver, SFL_COUNTERS_SAMPLE_
     /* update the pktlen */
     receiver->sampleCollector.pktlen = (u_char *)receiver->sampleCollector.datap - (u_char *)receiver->sampleCollector.data;
     return packedSize;
-}
-
-/*_________________---------------------------------__________________
-  _________________ sfl_receiver_samplePacketsSent  __________________
-  -----------------_________________________________------------------
-*/
-
-uint32_t sfl_receiver_samplePacketsSent(SFLReceiver *receiver)
-{
-    return receiver->sampleCollector.packetSeqNo;
 }
 
 /*_________________---------------------------__________________

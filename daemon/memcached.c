@@ -63,7 +63,7 @@ static inline void item_set_cas(const void *cookie, item *it, uint64_t cas) {
     GUTS(conn, thread_stats, slab_op, thread_op); \
     pthread_mutex_unlock(&thread_stats->mutex); \
     TK(topkeys, slab_op, key, nkey, current_time); \
-}
+    } 
 
 #define STATS_INCR(conn, op, key, nkey) \
     STATS_INCR1(THREAD_GUTS, conn, op, op, key, nkey)
@@ -860,6 +860,7 @@ void conn_set_state(conn *c, STATE_FUNC state) {
 
         if (state == conn_write || state == conn_mwrite) {
             MEMCACHED_PROCESS_COMMAND_END(c->sfd, c->wbuf, c->wbytes);
+            SFLOW_SAMPLE(c, NULL, 0, 0, -1, -1); // catch-all
         }
     }
 }
@@ -1506,6 +1507,8 @@ static void complete_incr_bin(conn *c) {
                                              c->binary_header.request.vbucket);
     }
 
+    SFLOW_SAMPLE(c, key, nkey, 0, -1, ret);
+
     switch (ret) {
     case ENGINE_SUCCESS:
         rsp->message.body.value = htonll(rsp->message.body.value);
@@ -1739,6 +1742,7 @@ static void process_bin_get(conn *c) {
         STATS_MISS(c, get, key, nkey);
 
         MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
+        SFLOW_SAMPLE(c, key, nkey, 1, -1, ENGINE_KEY_ENOENT); 
 
         if (c->noreply) {
             conn_set_state(c, conn_new_cmd);
@@ -4082,8 +4086,8 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
 
                 MEMCACHED_COMMAND_GET(c->sfd, info.key, info.nkey,
                                       info.nbytes, info.cas);
-
                 SFLOW_SAMPLE(c, key, info.nkey, ntokens-2, info.nbytes, ret);
+
                 if (return_cas)
                 {
 
@@ -4147,6 +4151,7 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
         if(key_token->value != NULL) {
             ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
             key_token = tokens;
+            SFLOW_COMMAND_START(c);
         }
 
     } while(key_token->value != NULL);
@@ -4308,6 +4313,8 @@ static char* process_arithmetic_command(conn *c, token_t *tokens, const size_t n
                                              &result, 0);
     }
 
+    SFLOW_SAMPLE(c, key, nkey, 0, 0, ret);
+
     char temp[INCR_MAX_STORAGE_LEN];
     switch (ret) {
     case ENGINE_SUCCESS:
@@ -4390,6 +4397,8 @@ static char *process_delete_command(conn *c, token_t *tokens,
                                          key, nkey, 0, 0);
     }
 
+    SFLOW_SAMPLE(c, key, nkey, 0, 0, ret);
+
     /* For some reason the SLAB_INCR tries to access this... */
     item_info info = { .nvalue = 1 };
     switch (ret) {
@@ -4434,6 +4443,8 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
     } else {
         out_string(c, "ERROR");
     }
+
+    SFLOW_SAMPLE(c, NULL, 0, 0, -1, ENGINE_SUCCESS);
 }
 
 static char* process_command(conn *c, char *command) {
