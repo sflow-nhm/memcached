@@ -820,6 +820,21 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
     }
 }
 
+#ifdef ENABLE_SFLOW
+/* do this specially because it does not require a lock to
+ * read these 32-bit numbers.  We don't really care that much
+ * if we get the value just before or just after it increments.
+ */
+uint32_t sflow_sample_pool_aggregate(void) {
+    int ii;
+    uint32_t pool = 0;
+    for (ii = 0; ii < settings.num_threads; ++ii) {
+        pool += threads[ii].sflow_sample_pool;
+    }
+    return pool;
+}
+#endif
+
 /*
  * Initializes the thread subsystem, creating various worker threads.
  *

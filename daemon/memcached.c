@@ -2877,7 +2877,7 @@ static void dispatch_bin_command(conn *c) {
     }
 
     MEMCACHED_PROCESS_COMMAND_START(c->sfd, c->rcurr, c->rbytes);
-    SFLOW_COMMAND_START(c);
+    SFLOW_SAMPLE_TEST(c);
     c->noreply = true;
 
     /* binprot supports 16bit keys, but internals are still 8bit */
@@ -4156,7 +4156,7 @@ static inline char* process_get_command(conn *c, token_t *tokens, size_t ntokens
         if(key_token->value != NULL) {
             ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
             key_token = tokens;
-            SFLOW_COMMAND_START(c);
+            SFLOW_SAMPLE_TEST(c);
         }
 
     } while(key_token->value != NULL);
@@ -4462,7 +4462,7 @@ static char* process_command(conn *c, char *command) {
     assert(c != NULL);
 
     MEMCACHED_PROCESS_COMMAND_START(c->sfd, c->rcurr, c->rbytes);
-    SFLOW_COMMAND_START(c);
+    SFLOW_SAMPLE_TEST(c);
 
     if (settings.verbose > 1) {
         settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,

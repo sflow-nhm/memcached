@@ -242,7 +242,15 @@ typedef struct {
 
     rel_time_t last_checked;
     struct conn *pending_close; /* list of connections close at a later time */
+#ifdef ENABLE_SFLOW
+    uint32_t sflow_sample_pool;
+    uint32_t sflow_random;
+#endif
 } LIBEVENT_THREAD;
+
+#ifdef ENABLE_SFLOW
+uint32_t sflow_sample_pool_aggregate(void); // in thread.c
+#endif
 
 #define LOCK_THREAD(t)                          \
     if (pthread_mutex_lock(&t->mutex) != 0) {   \

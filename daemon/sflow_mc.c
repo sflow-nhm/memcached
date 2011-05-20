@@ -25,10 +25,6 @@
 
 #include "sflow_mc.h"
 
-// globals
-uint32_t sflow_sample_pool;
-uint32_t sflow_skip;
-
 #include "sflow_api.h"
 #define SFMC_VERSION "0.91"
 #define SFMC_DEFAULT_CONFIGFILE "/etc/hsflowd.auto"
@@ -54,6 +50,9 @@ typedef struct _SFMCConfig {
 } SFMCConfig;
 
 typedef struct _SFMC {
+    /* sampling parameters */
+    uint32_t sflow_random_seed;
+    uint32_t sflow_random_threshold;
     /* the sFlow agent */
     SFLAgent *agent;
     /* need mutex when building sample */
@@ -308,22 +307,29 @@ static SFLMemcache_cmd sflow_map_binary_cmd(int cmd) {
     return sflcmd;
 }
 
-static int32_t sflow_add_random_skip(SFLSampler *sampler)
-{
-    uint32_t next_skip = sfl_sampler_next_skip(sampler);
-    uint32_t prev_skip = SFMC_ATOMIC_FETCH_ADD(sflow_skip /*sampler->skip*/, next_skip);
-    return (prev_skip + next_skip);
-}
-
-void sflow_command_start(struct conn *c) {
-    /* skip just went from 1 to 0, so take sample. */
-    /* Relax. We are out of the critical path already. */
-    SFMC *sm = &sfmc;
-    if(sm->config &&
-       sm->config->sampling_n &&
-       sm->agent &&
-       sm->agent->samplers) {
-        SFLSampler *sampler = sm->agent->samplers;
+/* This is the 32-bit PRNG recommended in G. Marsaglia, "Xorshift RNGs",
+ * _Journal of Statistical Software_ 8:14 (July 2003).  According to the paper,
+ * it has a period of 2**32 - 1 and passes almost all tests of randomness.  It
+ * is currently also used for sFlow sampling in the Open vSwitch project
+ * at http://www.openvswitch.org.
+ */
+void sflow_sample_test(struct conn *c) {
+    if(unlikely(!sfmc.sflow_random_seed)) {
+        /* sampling not configured */
+        return;
+    }
+    c->thread->sflow_sample_pool++;
+    uint32_t seed = c->thread->sflow_random;
+    if(unlikely(seed == 0)) {
+        /* initialize random number generation */
+        seed = sfmc.sflow_random_seed ^ c->thread->index;
+    }
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    c->thread->sflow_random = seed;
+    if(unlikely(seed <= sfmc.sflow_random_threshold)) {
+        /* Relax. We are out of the critical path now. */
         /* since we are sampling at the start of the transaction
            all we have to do here is record the wall-clock time.
            The rest is done at the end of the transaction.
@@ -333,29 +339,6 @@ void sflow_command_start(struct conn *c) {
            that we can really do better than microsecond accuracy
            anyway. */
         gettimeofday(&c->sflow_start_time, NULL);
-        /* need the semaphore to protect sfl_sampler_next_skip().  We could probably
-           do this differently and avoid this mutex grab, but it shouldn't matter because
-           we are out of the critical path now. */
-        SEMLOCK_DO(sm->mutex) {
-            /* the skip counter could be something like -1 or -2 now if other threads
-               were decrementing it while we were getting the timestamp. So rather than
-               just set the new skip count and ignore those other decrements, we do an
-               atomic add.
-               In the extreme case where the new random skip is small then we might not
-               get the skip back above 0 with this add,  and so the new skip would
-               effectively be ~ 2^32.  Just to make sure that doesn't happen we loop
-               until the skip is above 0 (and count any extra adds as drop-events).
-               We could also do this simply by generating a new random number every
-               time,  and testing it against a threshold.  The assumption here is
-               that the atomic-decrement-and-test works out to be less expensive,
-               and this way we get to generate our random numbers out of the critical
-               path and with the semaphore locked.  That means we can use any random
-               number generator we want and we don't have to worry about making the
-               seed a thread-local variable. */
-            while(sflow_add_random_skip(sampler) < 0) {
-                sampler->dropEvents++;
-            }
-        }
     }
 }
         
@@ -376,8 +359,9 @@ void sflow_sample(SFLMemcache_cmd command, struct conn *c, const void *key, size
     timerclear(&c->sflow_start_time);
     
     SFL_FLOW_SAMPLE_TYPE fs = { 0 };
-    /* have to pass in the pool since we pulled it out as a global */
-    fs.sample_pool = sflow_sample_pool;
+
+    /* have to add up the pool from all the threads */
+    fs.sample_pool = sflow_sample_pool_aggregate();
     
     /* indicate that I am the server by setting the
        destination interface to 0x3FFFFFFF=="internal"
@@ -828,15 +812,18 @@ static void sflow_init(SFMC *sm) {
             /* seed the random number generator so that there is no
                synchronization even when a large cluster starts up all 
                at the exact same instant */
+            /* could also read 4 bytes from /dev/urandom to do this */
             uint32_t hash = sm->start_time.tv_sec ^ sm->start_time.tv_usec;
             u_char *addr = sm->config->agentIP.address.ip_v6.addr;
             for(int i = 0; i < 16; i += 2) {
                 hash *= 3;
                 hash += ((addr[i] << 8) | addr[i+1]);
             }
-            sfl_random_init(hash);
-            /* generate the first sampling skip */
-            sflow_skip = sfl_sampler_next_skip(sampler);
+            sfmc.sflow_random_seed = hash;
+            sfmc.sflow_random_threshold = (sm->config->sampling_n == 1) ? 0 : ((uint32_t)-1 / sm->config->sampling_n);
+        }
+        else {
+            sfmc.sflow_random_seed = 0;
         }
     }
 }
